@@ -1,89 +1,69 @@
-# Base Image
+# This vLLM Dockerfile is used to construct image that can build and run vLLM on x86 CPU platform.
+
 FROM ubuntu:22.04 AS cpu-test-1
 
-# Set Environment Variables
 ENV CCACHE_DIR=/root/.cache/ccache
+
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+RUN --mount=type=cache,target=/var/cache/apt \
+    apt-get update -y \
+    && apt-get install -y curl ccache git wget vim numactl gcc-12 g++-12 python3 python3-pip libtcmalloc-minimal4 libnuma-dev \
+    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
+
+# https://intel.github.io/intel-extension-for-pytorch/cpu/latest/tutorials/performance_tuning/tuning_guide.html
+# intel-openmp provides additional performance improvement vs. openmp
+# tcmalloc provides better memory allocation efficiency, e.g, holding memory in caches to speed up access of commonly-used objects.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install intel-openmp==2025.0.1
+
 ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/lib/libiomp5.so"
-ENV PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 
-# Update and Install Dependencies
-RUN apt-get update -y && \
-    apt-get install -y \
-        curl \
-        ccache \
-        git \
-        wget \
-        vim \
-        numactl \
-        gcc-12 \
-        g++-12 \
-        python3 \
-        python3-pip \
-        libtcmalloc-minimal4 \
-        libnuma-dev \
-        ffmpeg \
-        libsm6 \
-        libxext6 \
-        libgl1 && \
-    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
-
-# Install Python Packages
-RUN pip install --no-cache-dir intel-openmp
-
-# Set ulimit in Bash Configuration
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
-# Install Intel Extension for PyTorch
-RUN pip install --no-cache-dir intel_extension_for_pytorch==2.5.0
+RUN pip install intel_extension_for_pytorch==2.5.0
 
-# Set Working Directory
 WORKDIR /workspace
 
-# Copy and Install Build Requirements
-COPY requirements-build.txt /workspace/requirements-build.txt
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements-build.txt
+ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
+ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,src=requirements-build.txt,target=requirements-build.txt \
+    pip install --upgrade pip && \
+    pip install -r requirements-build.txt
 
-# Build Stage
 FROM cpu-test-1 AS build
 
-# Set Working Directory
 WORKDIR /workspace/vllm
 
-# Copy Common and CPU Requirements
-COPY requirements-common.txt /workspace/vllm/requirements-common.txt
-COPY requirements-cpu.txt /workspace/vllm/requirements-cpu.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,src=requirements-common.txt,target=requirements-common.txt \
+    --mount=type=bind,src=requirements-cpu.txt,target=requirements-cpu.txt \
+    pip install -v -r requirements-cpu.txt
 
-# Install Common and CPU Requirements
-RUN pip install --no-cache-dir -v -r requirements-cpu.txt
-
-# Copy the Entire Repository
-COPY . /workspace/vllm
-
-# Conditional Git Repository Check
+COPY . .
 ARG GIT_REPO_CHECK=0
-RUN if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh; fi
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
-# Handle AVX512 Configuration
+# Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
 ARG VLLM_CPU_DISABLE_AVX512
 ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
 
-# Build the Wheel and Install
-RUN VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel && \
-    pip install --no-cache-dir dist/*.whl && \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=bind,source=.git,target=.git \
+    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel && \
+    pip install dist/*.whl && \
     rm -rf dist
 
-# Set Working Directory Back
 WORKDIR /workspace/
 
-# Create Symbolic Links
-RUN ln -s /workspace/vllm/tests /workspace/tests && \
-    ln -s /workspace/vllm/examples /workspace/examples && \
-    ln -s /workspace/vllm/benchmarks /workspace/benchmarks
+RUN ln -s /workspace/vllm/tests && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
 
-# Install Development Dependencies for Testing
-RUN pip install --no-cache-dir -e tests/vllm_test_utils
+# install development dependencies (for testing)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -e tests/vllm_test_utils
 
-# Set Entry Point
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
