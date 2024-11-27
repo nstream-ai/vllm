@@ -52,8 +52,8 @@ FROM cpu-test-1 AS build
 WORKDIR /workspace/vllm
 
 # Copy Common and CPU Requirements
-COPY requirements-common.txt /workspace/requirements-common.txt
-COPY requirements-cpu.txt /workspace/requirements-cpu.txt
+COPY requirements-common.txt /workspace/vllm/requirements-common.txt
+COPY requirements-cpu.txt /workspace/vllm/requirements-cpu.txt
 
 # Install Common and CPU Requirements
 RUN pip install --no-cache-dir -v -r requirements-cpu.txt
